@@ -393,14 +393,11 @@ function(set_glob VAR GLOBBING EXTS DIRECTORY) # ...
   set(${VAR} ${FILES} PARENT_SCOPE)
 endfunction()
 
-function(set_src VAR GLOBBING DIRECTORY) # ...
-  set_glob(${VAR} ${
-	GLOBBING} "c;cpp;h" ${DIRECTORY} ${ARGN})
-  set(${VAR} ${
-	$ { VAR }} PARENT_SCOPE)
-  set(CHECKSUM_SRC ${CHECKSUM_SRC} ${
-	$ { VAR }} PARENT_SCOPE)
-endfunction()
+  function(set_src VAR GLOBBING DIRECTORY) # ...
+    set_glob(${VAR} ${GLOBBING} "c;cpp;h" ${DIRECTORY} ${ARGN})
+    set(${VAR} ${${VAR}} PARENT_SCOPE)
+    set(CHECKSUM_SRC ${CHECKSUM_SRC} ${${VAR}} PARENT_SCOPE)
+  endfunction()
 set(CHECKSUM_SRC)
 
 function(set_own_rpath TARGET)
@@ -2829,19 +2826,18 @@ if(SERVER)
       $<TARGET_OBJECTS:game-shared>
       $<TARGET_OBJECTS:rust-bridge-shared>
     )
-  else()
-    add_executable(game-server
-      ${
-	DEPS}
-      "${PROJECT_SOURCE_DIR}/src/engine/server/main.cpp"
-      ${SERVER_ICON}
-      ${SERVER_VERSIONINFO}
-      $<TARGET_OBJECTS:game-server-without-main>
-      $<TARGET_OBJECTS:engine-shared>
-      $<TARGET_OBJECTS:game-shared>
-      $<TARGET_OBJECTS:rust-bridge-shared>
-    )
-  endif()
+    else()
+      add_executable(game-server
+        ${DEPS}
+        "${PROJECT_SOURCE_DIR}/src/engine/server/main.cpp"
+        ${SERVER_ICON}
+        ${SERVER_VERSIONINFO}
+        $<TARGET_OBJECTS:game-server-without-main>
+        $<TARGET_OBJECTS:engine-shared>
+        $<TARGET_OBJECTS:game-shared>
+        $<TARGET_OBJECTS:rust-bridge-shared>
+      )
+    endif()
   set_property(TARGET game-server
       PROPERTY OUTPUT_NAME ${SERVER_EXECUTABLE}
   )
