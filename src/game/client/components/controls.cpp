@@ -1,5 +1,5 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
-/* If you are missing that file, acquire a complete release at teeworlds.com.                */
+/* If you are missing that file, acquire a complete release at teeworlds.com.		*/
 #include <base/math.h>
 
 #include <engine/client.h>
@@ -11,10 +11,55 @@
 #include <game/client/components/scoreboard.h>
 #include <game/client/gameclient.h>
 #include <game/collision.h>
+#include <game/mapitems.h>
 
 #include <base/vmath.h>
 
 #include "controls.h"
+
+// Predict fewer ticks ahead so the player can approach freeze walls more closely
+static constexpr int g_PredictFreezeTicks = 3;
+
+static bool CheckFreeze(const vec2 &Pos, CCollision *pCollision, vec2 *pHit = nullptr)
+{
+	static const vec2 s_aOffsets[] = {
+		vec2(0.0f, 0.0f),
+		vec2(14.0f, 0.0f),
+		vec2(-14.0f, 0.0f),
+		vec2(0.0f, 14.0f),
+		vec2(0.0f, -14.0f)};
+	for(const vec2 &Off : s_aOffsets)
+	{
+		int Index = pCollision->GetPureMapIndex(Pos + Off);
+		int Tile = pCollision->GetTileIndex(Index);
+		int FrontTile = pCollision->GetFrontTileIndex(Index);
+		if(Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE ||
+			FrontTile == TILE_FREEZE || FrontTile == TILE_DFREEZE || FrontTile == TILE_LFREEZE)
+		{
+			if(pHit)
+				*pHit = Off;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input, CCollision *pCollision, bool CheckStart = true, vec2 *pHit = nullptr)
+{
+	if(CheckStart && CheckFreeze(Core.m_Pos, pCollision, pHit))
+		return true;
+
+	for(int i = 0; i < g_PredictFreezeTicks; i++)
+	{
+		Core.m_Input = Input;
+		Core.Tick(true);
+		Core.Move();
+		Core.Quantize();
+		if(CheckFreeze(Core.m_Pos, pCollision, pHit))
+			return true;
+	}
+	return false;
+}
 
 CControls::CControls()
 {
@@ -274,6 +319,46 @@ int CControls::SnapInput(int *pData)
 				pDummyInput->m_Fire++;
 
 			pDummyInput->m_Hook = g_Config.m_ClDummyHook;
+		}
+
+		if(g_Config.m_ClAvoidFreeze && m_pClient->m_Snap.m_LocalClientId >= 0)
+		{
+			int LocalId = m_pClient->m_Snap.m_LocalClientId;
+			CCharacterCore Core = m_pClient->m_aClients[LocalId].m_Predicted;
+			CNetObj_PlayerInput &Input = m_aInputData[g_Config.m_ClDummy];
+			vec2 HitDir;
+			if(PredictFreeze(Core, Input, m_pClient->Collision(), true, &HitDir))
+			{
+				// ignore vertical threats to not block jumping or falling
+				if(absolute(HitDir.y) <= absolute(HitDir.x))
+				{
+					bool Move = true;
+					if(g_Config.m_ClAvoidFreezeHook)
+					{
+						// release hook first to avoid being pulled into freeze
+						Input.m_Hook = 0;
+						Move = PredictFreeze(Core, Input, m_pClient->Collision(), true, &HitDir);
+					}
+					if(Move)
+					{
+						CNetObj_PlayerInput Test = Input;
+						Test.m_Direction = -1;
+						bool SafeLeft = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
+						Test.m_Direction = 1;
+						bool SafeRight = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
+
+						int Desired = HitDir.x > 0 ? -1 : 1;
+						if(SafeLeft && !SafeRight)
+							Desired = -1;
+						else if(SafeRight && !SafeLeft)
+							Desired = 1;
+						else if(SafeLeft && SafeRight)
+							Desired = Core.m_Vel.x > 0 ? -1 : 1;
+
+						Input.m_Direction = Desired;
+					}
+				}
+			}
 		}
 
 		// stress testing
