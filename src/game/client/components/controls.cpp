@@ -19,20 +19,20 @@
 
 static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input, int Ticks, CCollision *pCollision)
 {
-       for(int i = 0; i < Ticks; i++)
-       {
-               Core.m_Input = Input;
-               Core.Tick(true);
-               Core.Move();
-               Core.Quantize();
-               int Index = pCollision->GetPureMapIndex(Core.m_Pos);
-               int Tile = pCollision->GetTileIndex(Index);
-               int FrontTile = pCollision->GetFrontTileIndex(Index);
-               if(Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE ||
-                  FrontTile == TILE_FREEZE || FrontTile == TILE_DFREEZE || FrontTile == TILE_LFREEZE)
-                       return true;
-       }
-       return false;
+	for(int i = 0; i < Ticks; i++)
+	{
+		Core.m_Input = Input;
+		Core.Tick(true);
+		Core.Move();
+		Core.Quantize();
+		int Index = pCollision->GetPureMapIndex(Core.m_Pos);
+		int Tile = pCollision->GetTileIndex(Index);
+		int FrontTile = pCollision->GetFrontTileIndex(Index);
+		if(Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE ||
+			FrontTile == TILE_FREEZE || FrontTile == TILE_DFREEZE || FrontTile == TILE_LFREEZE)
+			return true;
+	}
+	return false;
 }
 
 CControls::CControls()
@@ -282,38 +282,58 @@ int CControls::SnapInput(int *pData)
 			m_aInputData[!g_Config.m_ClDummy] = *pDummyInput;
 		}
 
-                if(g_Config.m_ClDummyControl)
-                {
-                        CNetObj_PlayerInput *pDummyInput = &m_pClient->m_DummyInput;
-                        pDummyInput->m_Jump = g_Config.m_ClDummyJump;
+		if(g_Config.m_ClDummyControl)
+		{
+			CNetObj_PlayerInput *pDummyInput = &m_pClient->m_DummyInput;
+			pDummyInput->m_Jump = g_Config.m_ClDummyJump;
 
-                        if(g_Config.m_ClDummyFire)
-                                pDummyInput->m_Fire = g_Config.m_ClDummyFire;
-                        else if((pDummyInput->m_Fire & 1) != 0)
-                                pDummyInput->m_Fire++;
+			if(g_Config.m_ClDummyFire)
+				pDummyInput->m_Fire = g_Config.m_ClDummyFire;
+			else if((pDummyInput->m_Fire & 1) != 0)
+				pDummyInput->m_Fire++;
 
-                        pDummyInput->m_Hook = g_Config.m_ClDummyHook;
-                }
+			pDummyInput->m_Hook = g_Config.m_ClDummyHook;
+		}
 
-                if(g_Config.m_ClAvoidFreeze && m_pClient->m_Snap.m_LocalClientId >= 0)
-                {
-                        int LocalId = m_pClient->m_Snap.m_LocalClientId;
-                        CCharacterCore Core = m_pClient->m_aClients[LocalId].m_Predicted;
-                        if(PredictFreeze(Core, m_aInputData[g_Config.m_ClDummy], 10, m_pClient->Collision()))
-                        {
-                                CNetObj_PlayerInput Alt = m_aInputData[g_Config.m_ClDummy];
-                                Alt.m_Direction = 0;
-                                if(PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
-                                {
-                                        Alt.m_Direction = m_aInputData[g_Config.m_ClDummy].m_Direction ? -m_aInputData[g_Config.m_ClDummy].m_Direction : (Core.m_Vel.x > 0 ? -1 : (Core.m_Vel.x < 0 ? 1 : 0));
-                                        if(PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
-                                                Alt.m_Direction = 0;
-                                }
-                                m_aInputData[g_Config.m_ClDummy].m_Direction = Alt.m_Direction;
-                        }
-                }
+		if(g_Config.m_ClAvoidFreeze && m_pClient->m_Snap.m_LocalClientId >= 0)
+		{
+			int LocalId = m_pClient->m_Snap.m_LocalClientId;
+			CCharacterCore Core = m_pClient->m_aClients[LocalId].m_Predicted;
+			CNetObj_PlayerInput &Input = m_aInputData[g_Config.m_ClDummy];
+			if(PredictFreeze(Core, Input, 10, m_pClient->Collision()))
+			{
+				CNetObj_PlayerInput Alt = Input;
 
-                // stress testing
+				// try releasing the hook if it would pull us into freeze
+				if(Alt.m_Hook)
+				{
+					Alt.m_Hook = 0;
+					if(!PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
+					{
+						Input.m_Hook = 0;
+						Alt = Input;
+					}
+					else
+					{
+						Alt = Input;
+					}
+				}
+
+				// stop movement completely
+				Alt.m_Direction = 0;
+				if(PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
+				{
+					// move opposite to current motion to brake faster
+					Alt.m_Direction = Input.m_Direction ? -Input.m_Direction : (Core.m_Vel.x > 0 ? -1 : (Core.m_Vel.x < 0 ? 1 : 0));
+					if(PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
+						Alt.m_Direction = 0;
+				}
+
+				Input.m_Direction = Alt.m_Direction;
+			}
+		}
+
+		// stress testing
 #ifdef CONF_DEBUG
 		if(g_Config.m_DbgStress)
 		{
