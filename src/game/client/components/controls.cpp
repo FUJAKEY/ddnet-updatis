@@ -297,43 +297,47 @@ int CControls::SnapInput(int *pData)
 			pDummyInput->m_Hook = g_Config.m_ClDummyHook;
 		}
 
-		if(g_Config.m_ClAvoidFreeze && m_pClient->m_Snap.m_LocalClientId >= 0)
-		{
-			int LocalId = m_pClient->m_Snap.m_LocalClientId;
-			CCharacterCore Core = m_pClient->m_aClients[LocalId].m_Predicted;
-			CNetObj_PlayerInput &Input = m_aInputData[g_Config.m_ClDummy];
-			if(PredictFreeze(Core, Input, m_pClient->Collision()))
-			{
-				// always release hook first to avoid being pulled into freeze
-				Input.m_Hook = 0;
+                if(g_Config.m_ClAvoidFreeze && m_pClient->m_Snap.m_LocalClientId >= 0)
+                {
+                        int LocalId = m_pClient->m_Snap.m_LocalClientId;
+                        CCharacterCore Core = m_pClient->m_aClients[LocalId].m_Predicted;
+                        CNetObj_PlayerInput &Input = m_aInputData[g_Config.m_ClDummy];
+                        if(PredictFreeze(Core, Input, m_pClient->Collision()))
+                        {
+                                bool NeedMove = true;
+                                if(g_Config.m_ClAvoidFreezeHook)
+                                {
+                                        // release hook first to avoid being pulled into freeze
+                                        Input.m_Hook = 0;
+                                        NeedMove = PredictFreeze(Core, Input, m_pClient->Collision());
+                                }
+                                if(NeedMove)
+                                {
+                                        CNetObj_PlayerInput Test = Input;
+                                        // try stopping
+                                        Test.m_Direction = 0;
+                                        if(PredictFreeze(Core, Test, m_pClient->Collision()))
+                                        {
+                                                // evaluate both directions and choose safe one
+                                                Test.m_Direction = -1;
+                                                bool SafeLeft = !PredictFreeze(Core, Test, m_pClient->Collision());
+                                                Test.m_Direction = 1;
+                                                bool SafeRight = !PredictFreeze(Core, Test, m_pClient->Collision());
 
-				if(PredictFreeze(Core, Input, m_pClient->Collision()))
-				{
-					CNetObj_PlayerInput Test = Input;
-					// try stopping
-					Test.m_Direction = 0;
-					if(PredictFreeze(Core, Test, m_pClient->Collision()))
-					{
-						// evaluate both directions and choose safe one
-						Test.m_Direction = -1;
-						bool SafeLeft = !PredictFreeze(Core, Test, m_pClient->Collision());
-						Test.m_Direction = 1;
-						bool SafeRight = !PredictFreeze(Core, Test, m_pClient->Collision());
-
-						if(SafeLeft && !SafeRight)
-							Input.m_Direction = -1;
-						else if(SafeRight && !SafeLeft)
-							Input.m_Direction = 1;
-						else
-							Input.m_Direction = 0;
-					}
-					else
-					{
-						Input.m_Direction = 0;
-					}
-				}
-			}
-		}
+                                                if(SafeLeft && !SafeRight)
+                                                        Input.m_Direction = -1;
+                                                else if(SafeRight && !SafeLeft)
+                                                        Input.m_Direction = 1;
+                                                else
+                                                        Input.m_Direction = 0;
+                                        }
+                                        else
+                                        {
+                                                Input.m_Direction = 0;
+                                        }
+                                }
+                        }
+                }
 
 		// stress testing
 #ifdef CONF_DEBUG
