@@ -17,9 +17,11 @@
 
 #include "controls.h"
 
-static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input, int Ticks, CCollision *pCollision)
+static constexpr int g_PredictFreezeTicks = 10;
+
+static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input, CCollision *pCollision)
 {
-	for(int i = 0; i < Ticks; i++)
+	for(int i = 0; i < g_PredictFreezeTicks; i++)
 	{
 		Core.m_Input = Input;
 		Core.Tick(true);
@@ -300,36 +302,36 @@ int CControls::SnapInput(int *pData)
 			int LocalId = m_pClient->m_Snap.m_LocalClientId;
 			CCharacterCore Core = m_pClient->m_aClients[LocalId].m_Predicted;
 			CNetObj_PlayerInput &Input = m_aInputData[g_Config.m_ClDummy];
-			if(PredictFreeze(Core, Input, 10, m_pClient->Collision()))
+			if(PredictFreeze(Core, Input, m_pClient->Collision()))
 			{
-				CNetObj_PlayerInput Alt = Input;
+				// always release hook first to avoid being pulled into freeze
+				Input.m_Hook = 0;
 
-				// try releasing the hook if it would pull us into freeze
-				if(Alt.m_Hook)
+				if(PredictFreeze(Core, Input, m_pClient->Collision()))
 				{
-					Alt.m_Hook = 0;
-					if(!PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
+					CNetObj_PlayerInput Test = Input;
+					// try stopping
+					Test.m_Direction = 0;
+					if(PredictFreeze(Core, Test, m_pClient->Collision()))
 					{
-						Input.m_Hook = 0;
-						Alt = Input;
+						// evaluate both directions and choose safe one
+						Test.m_Direction = -1;
+						bool SafeLeft = !PredictFreeze(Core, Test, m_pClient->Collision());
+						Test.m_Direction = 1;
+						bool SafeRight = !PredictFreeze(Core, Test, m_pClient->Collision());
+
+						if(SafeLeft && !SafeRight)
+							Input.m_Direction = -1;
+						else if(SafeRight && !SafeLeft)
+							Input.m_Direction = 1;
+						else
+							Input.m_Direction = 0;
 					}
 					else
 					{
-						Alt = Input;
+						Input.m_Direction = 0;
 					}
 				}
-
-				// stop movement completely
-				Alt.m_Direction = 0;
-				if(PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
-				{
-					// move opposite to current motion to brake faster
-					Alt.m_Direction = Input.m_Direction ? -Input.m_Direction : (Core.m_Vel.x > 0 ? -1 : (Core.m_Vel.x < 0 ? 1 : 0));
-					if(PredictFreeze(Core, Alt, 10, m_pClient->Collision()))
-						Alt.m_Direction = 0;
-				}
-
-				Input.m_Direction = Alt.m_Direction;
 			}
 		}
 
