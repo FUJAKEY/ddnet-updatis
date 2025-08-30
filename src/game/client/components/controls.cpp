@@ -17,7 +17,8 @@
 
 #include "controls.h"
 
-static constexpr int g_PredictFreezeTicks = 6;
+// Predict fewer ticks ahead so the player can approach freeze walls more closely
+static constexpr int g_PredictFreezeTicks = 3;
 
 static bool CheckFreeze(const vec2 &Pos, CCollision *pCollision, vec2 *pHit = nullptr)
 {
