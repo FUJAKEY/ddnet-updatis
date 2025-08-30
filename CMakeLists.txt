@@ -3490,8 +3490,7 @@ include(CPack)
 
 #In the future(CMake 3.8.0 +), use source_group(TREE...)
 macro(source_group_tree dir)
-  file(GLOB ents RELATIVE ${PROJECT_SOURCE_DIR}/${dir} ${PROJECT_SOURCE_DIR}/${
-	dir}/*)
+  file(GLOB ents RELATIVE ${PROJECT_SOURCE_DIR}/${dir} ${PROJECT_SOURCE_DIR}/${dir}/*)
   foreach(ent ${ents})
     if(IS_DIRECTORY ${PROJECT_SOURCE_DIR}/${dir}/${ent})
       source_group_tree(${dir}/${ent})
