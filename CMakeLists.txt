@@ -3135,15 +3135,12 @@ function(regex_inverted VAR)
 
     set(ADDITIONAL)
     foreach(outer ${REMAINING})
-      string(SUBSTRING ${
-	outer} 0 ${i} OUTER_PREFIX)
+      string(SUBSTRING ${outer} 0 ${i} OUTER_PREFIX)
       set(CHARS "")
       foreach(inner ${REMAINING})
-        string(SUBSTRING ${
-	inner} 0 ${i} INNER_PREFIX)
+        string(SUBSTRING ${inner} 0 ${i} INNER_PREFIX)
         if(OUTER_PREFIX STREQUAL INNER_PREFIX)
-          string(SUBSTRING ${inner} ${
-	i} 1 INNER_NEXT)
+          string(SUBSTRING ${inner} ${i} 1 INNER_NEXT)
           set(CHARS "${CHARS}${INNER_NEXT}")
         endif()
       endforeach()
