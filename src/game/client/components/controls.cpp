@@ -507,57 +507,59 @@ int CControls::SnapInput(int *pData)
 						DangerPersists = PredictFreeze(Core, Input, m_pClient->Collision(), true, &HitDirShort);
 					}
 
-					if(DangerPersists)
-					{
-						CNetObj_PlayerInput Test = Input;
-						Test.m_Direction = -1;
-						const bool SafeLeft = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
-						Test.m_Direction = 1;
-						const bool SafeRight = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
+                                        if(DangerPersists)
+                                        {
+                                                CNetObj_PlayerInput Test = Input;
+                                                Test.m_Direction = -1;
+                                                const bool SafeLeft = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
+                                                Test.m_Direction = 1;
+                                                const bool SafeRight = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
 
-						int Desired = HitDirShort.x > 0 ? -1 : 1;
-						if(SafeLeft && !SafeRight)
-							Desired = -1;
-						else if(SafeRight && !SafeLeft)
-							Desired = 1;
-						else if(SafeLeft && SafeRight)
-						{
-							if(Core.m_Vel.x > 0.1f)
-								Desired = -1;
-							else if(Core.m_Vel.x < -0.1f)
-								Desired = 1;
-							else
-								Desired = HitDirShort.x > 0 ? -1 : 1;
-						}
+                                                int Desired = HitDirShort.x > 0 ? -1 : 1;
+                                                if(SafeLeft && !SafeRight)
+                                                        Desired = -1;
+                                                else if(SafeRight && !SafeLeft)
+                                                        Desired = 1;
+                                                else if(SafeLeft && SafeRight)
+                                                {
+                                                        if(Core.m_Vel.x > 0.1f)
+                                                                Desired = -1;
+                                                        else if(Core.m_Vel.x < -0.1f)
+                                                                Desired = 1;
+                                                        else
+                                                                Desired = HitDirShort.x > 0 ? -1 : 1;
+                                                }
 
-						Input.m_Direction = Desired;
-				}
+                                                Input.m_Direction = Desired;
+                                        }
+                                }
 
-				if(DangerLong && !HookDirFromExtended)
-					HookThreatDir = HitDirShort;
-			}
+                                if(DangerLong && !HookDirFromExtended)
+                                        HookThreatDir = HitDirShort;
+                        }
 
-			if(GoresMode == 2 && DangerLong)
-			{
-				bool ShouldHook = false;
-				const bool HorizontalThreat = absolute(HookThreatDir.y) <= absolute(HookThreatDir.x);
-				if(HorizontalThreat)
-				{
-					CNetObj_PlayerInput Future = Input;
-					if(PredictFreeze(Core, Future, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
-						ShouldHook = true;
-				}
-				else if(PredictFreeze(Core, Input, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
-					ShouldHook = true;
+                        if(GoresMode == 2 && DangerLong)
+                        {
+                                bool ShouldHook = false;
+                                const bool HorizontalThreat = absolute(HookThreatDir.y) <= absolute(HookThreatDir.x);
+                                if(HorizontalThreat)
+                                {
+                                        CNetObj_PlayerInput Future = Input;
+                                        if(PredictFreeze(Core, Future, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
+                                                ShouldHook = true;
+                                }
+                                else if(PredictFreeze(Core, Input, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
+                                        ShouldHook = true;
 
-				if(ShouldHook)
-				{
-					float HookLength = m_pClient->m_aTuning[g_Config.m_ClDummy].m_HookLength;
-					if(!TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, false))
-						TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, true);
-				}
-			}
-		// stress testing
+                                if(ShouldHook)
+                                {
+                                        float HookLength = m_pClient->m_aTuning[g_Config.m_ClDummy].m_HookLength;
+                                        if(!TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, false))
+                                                TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, true);
+                                }
+                        }
+                }
+                // stress testing
 #ifdef CONF_DEBUG
 		if(g_Config.m_DbgStress)
 		{
