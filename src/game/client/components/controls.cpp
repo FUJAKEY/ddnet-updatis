@@ -1,5 +1,6 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
-/* If you are missing that file, acquire a complete release at teeworlds.com.                */
+/* If you are missing that file, acquire a complete release at teeworlds.com.		*/
+#include <array>
 #include <base/math.h>
 
 #include <engine/client.h>
@@ -11,10 +12,129 @@
 #include <game/client/components/scoreboard.h>
 #include <game/client/gameclient.h>
 #include <game/collision.h>
+#include <game/mapitems.h>
 
 #include <base/vmath.h>
 
 #include "controls.h"
+
+// Predict fewer ticks ahead so the player can approach freeze walls more closely
+static constexpr int g_PredictFreezeTicks = 3;
+
+static bool CheckFreeze(const vec2 &Pos, CCollision *pCollision, vec2 *pHit = nullptr)
+{
+	static const vec2 s_aOffsets[] = {
+		vec2(0.0f, 0.0f),
+		vec2(14.0f, 0.0f),
+		vec2(-14.0f, 0.0f),
+		vec2(0.0f, 14.0f),
+		vec2(0.0f, -14.0f)};
+	for(const vec2 &Off : s_aOffsets)
+	{
+		int Index = pCollision->GetPureMapIndex(Pos + Off);
+		int Tile = pCollision->GetTileIndex(Index);
+		int FrontTile = pCollision->GetFrontTileIndex(Index);
+		if(Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE ||
+			FrontTile == TILE_FREEZE || FrontTile == TILE_DFREEZE || FrontTile == TILE_LFREEZE)
+		{
+			if(pHit)
+				*pHit = Off;
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input, CCollision *pCollision, bool CheckStart = true, vec2 *pHit = nullptr)
+{
+	if(CheckStart && CheckFreeze(Core.m_Pos, pCollision, pHit))
+		return true;
+
+	for(int i = 0; i < g_PredictFreezeTicks; i++)
+	{
+		Core.m_Input = Input;
+		Core.Tick(true);
+		Core.Move();
+		Core.Quantize();
+		if(CheckFreeze(Core.m_Pos, pCollision, pHit))
+			return true;
+	}
+	return false;
+}
+
+static bool TryHookRescue(const CCharacterCore &Core, CNetObj_PlayerInput &Input, const vec2 &HitDir, CCollision *pCollision,
+	float HookLength, bool AllowUnsafe)
+{
+	if(HookLength <= 0.0f)
+		HookLength = 380.0f;
+
+	const int Sign = HitDir.x >= 0.0f ? 1 : -1;
+	const std::array<vec2, 7> aDirections = {
+		vec2(-Sign, -0.2f),
+		vec2(-Sign, -0.6f),
+		vec2(-Sign, 0.2f),
+		vec2(-Sign, 0.6f),
+		vec2(-Sign * 0.5f, -1.0f),
+		vec2(-Sign * 0.5f, 1.0f),
+		vec2(0.0f, -1.0f),
+	};
+
+	bool FoundSafe = false;
+	float BestSafeScore = -1e9f;
+	vec2 BestSafeAim = Core.m_Pos;
+
+	float BestAnyScore = -1e9f;
+	vec2 BestAnyAim = Core.m_Pos;
+	const vec2 PreferredDir = vec2(-Sign, 0.0f);
+
+	for(const vec2 &Candidate : aDirections)
+	{
+		if(length(Candidate) < 0.001f)
+			continue;
+
+		vec2 Dir = normalize(Candidate);
+		vec2 AimPos = Core.m_Pos + Dir * HookLength;
+
+		CNetObj_PlayerInput Test = Input;
+		Test.m_Hook = 1;
+		Test.m_TargetX = (int)AimPos.x;
+		Test.m_TargetY = (int)AimPos.y;
+
+		const bool Safe = !PredictFreeze(Core, Test, pCollision, false);
+		const float Score = dot(Dir, PreferredDir) * 2.0f - absolute(Dir.y);
+
+		if(Safe && Score > BestSafeScore)
+		{
+			BestSafeScore = Score;
+			BestSafeAim = AimPos;
+			FoundSafe = true;
+		}
+
+		if(Score > BestAnyScore)
+		{
+			BestAnyScore = Score;
+			BestAnyAim = AimPos;
+		}
+	}
+
+	if(FoundSafe)
+	{
+		Input.m_Hook = 1;
+		Input.m_TargetX = (int)BestSafeAim.x;
+		Input.m_TargetY = (int)BestSafeAim.y;
+		return true;
+	}
+
+	if(AllowUnsafe && BestAnyScore > -1e8f)
+	{
+		Input.m_Hook = 1;
+		Input.m_TargetX = (int)BestAnyAim.x;
+		Input.m_TargetY = (int)BestAnyAim.y;
+		return true;
+	}
+
+	return false;
+}
 
 CControls::CControls()
 {
@@ -274,6 +394,71 @@ int CControls::SnapInput(int *pData)
 				pDummyInput->m_Fire++;
 
 			pDummyInput->m_Hook = g_Config.m_ClDummyHook;
+		}
+
+		const int GoresMode = clamp(g_Config.m_ClGoresBot, 0, 2);
+		const bool AvoidFreezeActive = g_Config.m_ClAvoidFreeze || GoresMode != 0;
+		if(AvoidFreezeActive && m_pClient->m_Snap.m_LocalClientId >= 0)
+		{
+			int LocalId = m_pClient->m_Snap.m_LocalClientId;
+			CCharacterCore Core = m_pClient->m_aClients[LocalId].m_Predicted;
+			CNetObj_PlayerInput &Input = m_aInputData[g_Config.m_ClDummy];
+			vec2 HitDir;
+			if(PredictFreeze(Core, Input, m_pClient->Collision(), true, &HitDir))
+			{
+				if(absolute(HitDir.y) <= absolute(HitDir.x))
+				{
+					const bool CancelHook = g_Config.m_ClAvoidFreezeHook && g_Config.m_ClAvoidFreeze && GoresMode == 0;
+					bool DangerPersists = true;
+					if(CancelHook)
+					{
+						Input.m_Hook = 0;
+						DangerPersists = PredictFreeze(Core, Input, m_pClient->Collision(), true, &HitDir);
+					}
+
+					if(DangerPersists)
+					{
+						CNetObj_PlayerInput Test = Input;
+						Test.m_Direction = -1;
+						const bool SafeLeft = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
+						Test.m_Direction = 1;
+						const bool SafeRight = !PredictFreeze(Core, Test, m_pClient->Collision(), false);
+
+						int Desired = HitDir.x > 0 ? -1 : 1;
+						if(SafeLeft && !SafeRight)
+							Desired = -1;
+						else if(SafeRight && !SafeLeft)
+							Desired = 1;
+						else if(SafeLeft && SafeRight)
+						{
+							if(Core.m_Vel.x > 0.1f)
+								Desired = -1;
+							else if(Core.m_Vel.x < -0.1f)
+								Desired = 1;
+							else
+								Desired = HitDir.x > 0 ? -1 : 1;
+						}
+
+						Input.m_Direction = Desired;
+
+						if(GoresMode == 2)
+						{
+							CNetObj_PlayerInput Future = Input;
+							if(PredictFreeze(Core, Future, m_pClient->Collision(), false))
+							{
+								float HookLength = m_pClient->m_aTuning[g_Config.m_ClDummy].m_HookLength;
+								if(HookLength <= 0.0f)
+									HookLength = 380.0f;
+
+								if(!TryHookRescue(Core, Input, HitDir, m_pClient->Collision(), HookLength, false))
+								{
+									TryHookRescue(Core, Input, HitDir, m_pClient->Collision(), HookLength, true);
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 
 		// stress testing
