@@ -83,10 +83,14 @@ static bool CheckFreeze(const vec2 &Pos, CCollision *pCollision, vec2 *pHit = nu
 	return false;
 }
 
-static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input, CCollision *pCollision, bool CheckStart = true, vec2 *pHit = nullptr, int Steps = g_PredictFreezeTicks)
+static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input, CCollision *pCollision, bool CheckStart = true, vec2 *pHit = nullptr, int Steps = g_PredictFreezeTicks, vec2 *pFinalPos = nullptr)
 {
 	if(CheckStart && CheckFreeze(Core.m_Pos, pCollision, pHit))
+	{
+		if(pFinalPos)
+			*pFinalPos = Core.m_Pos;
 		return true;
+	}
 
 	for(int i = 0; i < Steps; i++)
 	{
@@ -95,179 +99,199 @@ static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input,
 		Core.Move();
 		Core.Quantize();
 		if(CheckFreeze(Core.m_Pos, pCollision, pHit))
+		{
+			if(pFinalPos)
+				*pFinalPos = Core.m_Pos;
 			return true;
+		}
 	}
+	if(pFinalPos)
+		*pFinalPos = Core.m_Pos;
 	return false;
 }
 
-static bool TryHookRescue(const CCharacterCore &Core, CNetObj_PlayerInput &Input, const vec2 &HitDir, CCollision *pCollision,
-        float HookLength, const vec2 &LastTarget, vec2 *pOutTarget, bool *pOutSafe)
+static bool TryHookRescue(const CCharacterCore &Core, const CNetObj_PlayerInput &Input, const vec2 &HitDir, CCollision *pCollision,
+	float HookLength, const vec2 &LastTarget, vec2 *pOutTarget, bool *pOutSafe, float *pOutScore = nullptr)
 {
-        if(HookLength <= 0.0f)
-                HookLength = 380.0f;
+	if(HookLength <= 0.0f)
+		HookLength = 380.0f;
 
-        vec2 ThreatDir = HitDir;
-        if(length(ThreatDir) < 0.01f)
-                ThreatDir = vec2(1.0f, 0.0f);
-        else
-                ThreatDir = normalize(ThreatDir);
+	vec2 ThreatDir = HitDir;
+	if(length(ThreatDir) < 0.01f)
+		ThreatDir = vec2(1.0f, 0.0f);
+	else
+		ThreatDir = normalize(ThreatDir);
 
-        vec2 EscapeNorm = -ThreatDir;
-        if(length(EscapeNorm) < 0.01f)
-                EscapeNorm = vec2(-1.0f, 0.0f);
-        else
-                EscapeNorm = normalize(EscapeNorm);
+	vec2 EscapeDir = -ThreatDir;
+	if(length(EscapeDir) < 0.01f)
+		EscapeDir = vec2(-1.0f, 0.0f);
+	else
+		EscapeDir = normalize(EscapeDir);
 
-        const vec2 Vel = Core.m_Vel;
-        const float VelLen = length(Vel);
-        vec2 VelNorm = vec2(0.0f, 0.0f);
-        if(VelLen > 0.001f)
-                VelNorm = Vel / VelLen;
+	const auto Rotate = [](const vec2 &Dir, float Angle) {
+		const float C = std::cos(Angle);
+		const float S = std::sin(Angle);
+		return vec2(Dir.x * C - Dir.y * S, Dir.x * S + Dir.y * C);
+	};
 
-        const auto Rotate = [](const vec2 &Dir, float Angle) {
-                const float C = std::cos(Angle);
-                const float S = std::sin(Angle);
-                return vec2(Dir.x * C - Dir.y * S, Dir.x * S + Dir.y * C);
-        };
+	float BestScore = -1e9f;
+	vec2 BestTarget = Core.m_Pos;
+	bool BestSafe = false;
+	bool Found = false;
 
-        const CNetObj_PlayerInput BaseInput = Input;
+	auto EvaluateDirection = [&](const vec2 &RawDir, float Bias = 0.0f) {
+		vec2 Dir = RawDir;
+		if(length(Dir) < 0.01f)
+			return;
+		Dir = normalize(Dir);
 
-        bool FoundSafe = false;
-        bool FoundFallback = false;
-        float BestSafeScore = -1e9f;
-        float BestFallbackScore = -1e9f;
-        vec2 BestSafeTarget = Core.m_Pos;
-        vec2 BestFallbackTarget = Core.m_Pos;
+		vec2 AimPos = Core.m_Pos + Dir * HookLength;
+		vec2 HookPoint = AimPos;
+		if(pCollision)
+		{
+			vec2 Before;
+			const int HitTile = pCollision->IntersectLineTeleHook(Core.m_Pos, AimPos, &HookPoint, &Before);
+			if(HitTile == 0 || HitTile == TILE_NOHOOK)
+				return;
+			if(IsFreezeTileIndex(HitTile))
+				return;
+			if(IsHookPointOnFreeze(HookPoint, pCollision))
+				return;
+			if(distance(Core.m_Pos, HookPoint) > HookLength + 1.0f)
+				return;
+		}
 
-        const auto EvaluateDirection = [&](const vec2 &RawDir) {
-                vec2 Dir = RawDir;
-                if(length(Dir) < 0.01f)
-                        return;
-                Dir = normalize(Dir);
+		vec2 AttachDir = HookPoint - Core.m_Pos;
+		if(length(AttachDir) < 1.0f)
+			return;
+		vec2 AttachNorm = normalize(AttachDir);
 
-                vec2 AimPos = Core.m_Pos + Dir * HookLength;
-                vec2 HookPoint = AimPos;
-                bool HasAttach = false;
-                if(pCollision)
-                {
-                        vec2 Before;
-                        const int HitTile = pCollision->IntersectLineTeleHook(Core.m_Pos, AimPos, &HookPoint, &Before);
-                        if(HitTile == 0 || HitTile == TILE_NOHOOK)
-                                return;
-                        if(IsFreezeTileIndex(HitTile))
-                                return;
-                        if(IsHookPointOnFreeze(HookPoint, pCollision))
-                                return;
-                        if(distance(Core.m_Pos, HookPoint) > HookLength + 1.0f)
-                                return;
-                        HasAttach = true;
-                }
+		const float AlignEscape = dot(AttachNorm, EscapeDir);
+		const float AlignThreat = dot(AttachNorm, ThreatDir);
 
-                if(!HasAttach)
-                        return;
+		if(HookPoint.y > Core.m_Pos.y + 48.0f && AlignEscape < 0.45f)
+			return;
 
-                CNetObj_PlayerInput Test = BaseInput;
-                Test.m_Hook = 1;
-                Test.m_TargetX = (int)HookPoint.x;
-                Test.m_TargetY = (int)HookPoint.y;
+		CNetObj_PlayerInput Candidate = Input;
+		Candidate.m_Hook = 1;
+		Candidate.m_TargetX = (int)HookPoint.x;
+		Candidate.m_TargetY = (int)HookPoint.y;
 
-                const bool Safe = !PredictFreeze(Core, Test, pCollision, false, nullptr, g_HookRescuePredictTicks);
+		vec2 FinalPos = Core.m_Pos;
+		const bool HitsFreeze = PredictFreeze(Core, Candidate, pCollision, false, nullptr, g_HookRescuePredictTicks, &FinalPos);
+		const bool Safe = !HitsFreeze;
 
-                float Score = dot(Dir, EscapeNorm) * 6.0f;
-                Score -= maximum(dot(Dir, ThreatDir), 0.0f) * 5.0f;
-                Score += clamp(-Dir.y, 0.0f, 1.0f) * 4.0f;
-                Score -= maximum(Dir.y, 0.0f) * 6.0f;
+		float Score = Bias;
+		Score += AlignEscape * 11.0f;
+		if(AlignEscape < 0.0f)
+			Score += AlignEscape * 4.0f;
 
-                if(VelLen > 0.001f)
-                        Score += -dot(Dir, VelNorm) * 2.0f;
+		Score -= maximum(AlignThreat, 0.0f) * 18.0f;
+		if(AlignThreat > 0.35f)
+			Score -= (AlignThreat - 0.35f) * 20.0f;
 
-                const float AttachDistance = distance(Core.m_Pos, HookPoint);
-                const float AttachScore = clamp(1.0f - AttachDistance / HookLength, 0.0f, 1.0f);
-                Score += AttachScore * 3.0f;
+		if(AttachNorm.y < 0.0f)
+			Score += clamp(-AttachNorm.y, 0.0f, 1.0f) * 6.0f;
+		else
+			Score -= clamp(AttachNorm.y, 0.0f, 1.0f) * 14.0f;
 
-                if(length(LastTarget) > 0.01f)
-                {
-                        const float Similarity = clamp(1.0f - distance(HookPoint, LastTarget) / 64.0f, -1.0f, 1.0f);
-                        Score += Similarity * 1.5f;
-                }
+		const float HeightDelta = Core.m_Pos.y - HookPoint.y;
+		Score += clamp(HeightDelta / 64.0f, -1.5f, 1.5f) * 4.5f;
 
-                if(Safe)
-                {
-                        if(!FoundSafe || Score > BestSafeScore)
-                        {
-                                FoundSafe = true;
-                                BestSafeScore = Score;
-                                BestSafeTarget = HookPoint;
-                        }
-                }
-                else
-                {
-                        Score -= 3.0f;
-                        if(!FoundFallback || Score > BestFallbackScore)
-                        {
-                                FoundFallback = true;
-                                BestFallbackScore = Score;
-                                BestFallbackTarget = HookPoint;
-                        }
-                }
-        };
+		const float AttachDistance = distance(Core.m_Pos, HookPoint);
+		Score += clamp(1.0f - AttachDistance / HookLength, 0.0f, 1.0f) * 3.0f;
 
-        if(length(LastTarget) > 0.01f)
-                EvaluateDirection(LastTarget - Core.m_Pos);
+		if(length(LastTarget) > 0.01f)
+		{
+			const float Similarity = clamp(1.0f - distance(HookPoint, LastTarget) / 48.0f, -1.0f, 1.0f);
+			Score += Similarity * 1.8f;
+		}
 
-        const int MaxAngleSteps = 11;
-        for(int Step = 0; Step <= MaxAngleSteps; ++Step)
-        {
-                const float Angle = DegToRad(Step * 15.0f);
-                EvaluateDirection(Rotate(EscapeNorm, Angle));
-                if(Step != 0)
-                        EvaluateDirection(Rotate(EscapeNorm, -Angle));
-        }
+		if(Safe)
+		{
+			Score += 5.0f;
+			const vec2 EscapeDelta = FinalPos - Core.m_Pos;
+			const float EscapeProgress = dot(EscapeDelta, EscapeDir);
+			Score += clamp(EscapeProgress / 96.0f, -1.5f, 1.5f) * 5.5f;
 
-        vec2 Side = vec2(-EscapeNorm.y, EscapeNorm.x);
-        for(int Step = -4; Step <= 4; ++Step)
-        {
-                const float Angle = DegToRad(Step * 15.0f);
-                EvaluateDirection(Rotate(Side, Angle));
-        }
+			const float HeightGain = Core.m_Pos.y - FinalPos.y;
+			Score += clamp(HeightGain / 72.0f, -1.0f, 1.0f) * 3.0f;
+		}
+		else
+		{
+			Score -= 12.0f;
+			if(AlignEscape < 0.25f)
+				return;
+		}
 
-        EvaluateDirection(vec2(0.0f, -1.0f));
-        EvaluateDirection(vec2(-1.0f, -0.4f));
-        EvaluateDirection(vec2(1.0f, -0.4f));
+		if(AttachNorm.y > 0.4f)
+			Score -= (AttachNorm.y - 0.4f) * 45.0f;
 
-        if(VelLen > 0.001f)
-        {
-                EvaluateDirection(-VelNorm);
-                EvaluateDirection(Rotate(-VelNorm, DegToRad(20.0f)));
-                EvaluateDirection(Rotate(-VelNorm, -DegToRad(20.0f)));
-        }
+		if(!Found || Score > BestScore)
+		{
+			Found = true;
+			BestScore = Score;
+			BestTarget = HookPoint;
+			BestSafe = Safe;
+		}
+	};
 
-        if(FoundSafe)
-        {
-                Input.m_Hook = 1;
-                Input.m_TargetX = (int)BestSafeTarget.x;
-                Input.m_TargetY = (int)BestSafeTarget.y;
-                if(pOutTarget)
-                        *pOutTarget = BestSafeTarget;
-                if(pOutSafe)
-                        *pOutSafe = true;
-                return true;
-        }
+	if(length(LastTarget) > 0.01f)
+	{
+		const vec2 LastDir = LastTarget - Core.m_Pos;
+		if(length(LastDir) > 1.0f)
+		{
+			const vec2 LastNorm = normalize(LastDir);
+			if(dot(LastNorm, EscapeDir) > 0.1f)
+				EvaluateDirection(LastDir, 2.5f);
+		}
+	}
 
-        if(FoundFallback)
-        {
-                Input.m_Hook = 1;
-                Input.m_TargetX = (int)BestFallbackTarget.x;
-                Input.m_TargetY = (int)BestFallbackTarget.y;
-                if(pOutTarget)
-                        *pOutTarget = BestFallbackTarget;
-                if(pOutSafe)
-                        *pOutSafe = false;
-                return true;
-        }
+	EvaluateDirection(EscapeDir, 3.0f);
 
-        return false;
+	const int MaxAngleSteps = 8;
+	for(int Step = 1; Step <= MaxAngleSteps; ++Step)
+	{
+		const float Angle = DegToRad(Step * 12.0f);
+		EvaluateDirection(Rotate(EscapeDir, Angle));
+		EvaluateDirection(Rotate(EscapeDir, -Angle));
+	}
+
+	vec2 SideDir = vec2(-EscapeDir.y, EscapeDir.x);
+	for(int Step = -3; Step <= 3; ++Step)
+	{
+		const float Angle = DegToRad(Step * 15.0f);
+		EvaluateDirection(Rotate(SideDir, Angle));
+	}
+
+	EvaluateDirection(vec2(0.0f, -1.0f), 1.5f);
+	EvaluateDirection(vec2(-1.0f, -0.4f));
+	EvaluateDirection(vec2(1.0f, -0.4f));
+
+	if(length(Core.m_Vel) > 0.01f)
+	{
+		vec2 VelNorm = normalize(Core.m_Vel);
+		EvaluateDirection(-VelNorm, 0.5f);
+		EvaluateDirection(Rotate(-VelNorm, DegToRad(20.0f)));
+		EvaluateDirection(Rotate(-VelNorm, -DegToRad(20.0f)));
+	}
+
+	if(!Found)
+		return false;
+
+	const float ScoreThreshold = -0.5f;
+	if(BestScore < ScoreThreshold)
+		return false;
+
+	if(pOutTarget)
+		*pOutTarget = BestTarget;
+	if(pOutSafe)
+		*pOutSafe = BestSafe;
+	if(pOutScore)
+		*pOutScore = BestScore;
+	return true;
 }
+
 
 CControls::CControls()
 {
@@ -604,112 +628,154 @@ int CControls::SnapInput(int *pData)
                                         HookThreatDir = HitDirShort;
                         }
 
-                        CRageState &RageState = m_aRageState[g_Config.m_ClDummy];
-                        const float HookLength = m_pClient->m_aTuning[g_Config.m_ClDummy].m_HookLength;
+				CRageState &RageState = m_aRageState[g_Config.m_ClDummy];
+				const float HookLength = m_pClient->m_aTuning[g_Config.m_ClDummy].m_HookLength;
 
-                        if(GoresMode == 2)
-                        {
-                                if(DangerLong)
-                                {
-                                        RageState.m_LastThreatDir = HookThreatDir;
-                                        bool ShouldHook = false;
-                                        const bool HorizontalThreat = absolute(HookThreatDir.y) <= absolute(HookThreatDir.x);
-                                        if(HorizontalThreat)
-                                        {
-                                                CNetObj_PlayerInput Future = Input;
-                                                if(PredictFreeze(Core, Future, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
-                                                        ShouldHook = true;
-                                        }
-                                        else if(PredictFreeze(Core, Input, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
-                                                ShouldHook = true;
+				if(GoresMode == 2)
+				{
+					const bool DangerActive = DangerLong;
+					if(DangerActive)
+					{
+						RageState.m_LastThreatDir = HookThreatDir;
+						vec2 NewTarget(0.0f, 0.0f);
+						bool SafeTarget = false;
+						float TargetScore = 0.0f;
+						if(TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &NewTarget, &SafeTarget, &TargetScore))
+						{
+							RageState.m_Active = true;
+							RageState.m_LastTarget = NewTarget;
+							RageState.m_LastThreatDir = HookThreatDir;
+							RageState.m_LastSafe = SafeTarget;
+							RageState.m_LastScore = TargetScore;
+							RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, SafeTarget ? 14 : 9);
+						}
+					}
 
-                                        if(ShouldHook)
-                                        {
-                                                vec2 NewTarget(0.0f, 0.0f);
-                                                bool SafeTarget = false;
-                                                if(TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &NewTarget, &SafeTarget))
-                                                {
-                                                        RageState.m_Active = true;
-                                                        RageState.m_LastTarget = NewTarget;
-                                                        RageState.m_LastThreatDir = HookThreatDir;
-                                                        RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, SafeTarget ? 8 : 4);
-                                                }
-                                        }
-                                }
+					bool KeepHook = RageState.m_Active;
 
-                                if(RageState.m_Active)
-                                {
-                                        bool KeepHook = DangerLong;
+					if(KeepHook)
+					{
+						if(!ValidateHookTarget(Core, RageState.m_LastTarget, m_pClient->Collision(), HookLength))
+							KeepHook = false;
+					}
 
-                                        if(!DangerLong)
-                                        {
-                                                if(RageState.m_HoldTicks > 0)
-                                                {
-                                                        RageState.m_HoldTicks--;
-                                                        KeepHook = true;
-                                                }
-                                                else
-                                                {
-                                                        CNetObj_PlayerInput ReleaseTest = Input;
-                                                        ReleaseTest.m_Hook = 0;
-                                                        if(PredictFreeze(Core, ReleaseTest, m_pClient->Collision(), true, nullptr, g_PredictFreezeTicks))
-                                                        {
-                                                                KeepHook = true;
-                                                                RageState.m_HoldTicks = 2;
-                                                        }
-                                                }
+					if(KeepHook && RageState.m_LastTarget.y > Core.m_Pos.y + 48.0f)
+					{
+						vec2 Adjusted(0.0f, 0.0f);
+						bool AdjustedSafe = false;
+						float AdjustedScore = 0.0f;
+						if(TryHookRescue(Core, Input, RageState.m_LastThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &Adjusted, &AdjustedSafe, &AdjustedScore))
+						{
+							RageState.m_LastTarget = Adjusted;
+							RageState.m_LastSafe = AdjustedSafe;
+							RageState.m_LastScore = AdjustedScore;
+							if(AdjustedSafe)
+								RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, 10);
+						}
+						else
+						{
+							KeepHook = false;
+						}
+					}
 
-                                                if(KeepHook && length(RageState.m_LastThreatDir) > 0.01f)
-                                                {
-                                                        CNetObj_PlayerInput Candidate = Input;
-                                                        vec2 NewTarget(0.0f, 0.0f);
-                                                        bool SafeTarget = false;
-                                                        if(TryHookRescue(Core, Candidate, RageState.m_LastThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &NewTarget, &SafeTarget))
-                                                        {
-                                                                Input = Candidate;
-                                                                RageState.m_LastTarget = NewTarget;
-                                                                if(SafeTarget)
-                                                                        RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, 4);
-                                                        }
-                                                }
-                                        }
-                                        else
-                                        {
-                                                RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, 4);
-                                        }
+					if(KeepHook && DangerActive)
+					{
+						vec2 LastDir = RageState.m_LastTarget - Core.m_Pos;
+						if(length(LastDir) > 0.01f && length(HookThreatDir) > 0.01f)
+						{
+							vec2 LastNorm = normalize(LastDir);
+							vec2 ThreatNorm = normalize(HookThreatDir);
+							if(dot(LastNorm, ThreatNorm) > -0.15f)
+							{
+								vec2 Adjusted(0.0f, 0.0f);
+								bool AdjustedSafe = false;
+								float AdjustedScore = 0.0f;
+								if(TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &Adjusted, &AdjustedSafe, &AdjustedScore))
+								{
+									RageState.m_LastTarget = Adjusted;
+									RageState.m_LastSafe = AdjustedSafe;
+									RageState.m_LastScore = AdjustedScore;
+									if(AdjustedSafe)
+										RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, 12);
+								}
+								else
+								{
+									KeepHook = false;
+								}
+							}
+						}
+						else if(length(HookThreatDir) > 0.01f)
+						{
+							RageState.m_LastThreatDir = HookThreatDir;
+						}
+					}
 
-                                        if(KeepHook)
-                                        {
-                                                if(!ValidateHookTarget(Core, RageState.m_LastTarget, m_pClient->Collision(), HookLength))
-                                                {
-                                                        RageState.Reset();
-                                                        Input.m_Hook = 0;
-                                                }
-                                                else
-                                                {
-                                                        Input.m_Hook = 1;
-                                                        Input.m_TargetX = (int)RageState.m_LastTarget.x;
-                                                        Input.m_TargetY = (int)RageState.m_LastTarget.y;
+					if(KeepHook && !DangerActive)
+					{
+						if(RageState.m_HoldTicks > 0)
+						{
+							RageState.m_HoldTicks--;
+						}
+						else
+						{
+							CNetObj_PlayerInput ReleaseTest = Input;
+							ReleaseTest.m_Hook = 0;
+							if(!PredictFreeze(Core, ReleaseTest, m_pClient->Collision(), true, nullptr, g_PredictFreezeTicks))
+							{
+								KeepHook = false;
+							}
+							else
+							{
+								RageState.m_HoldTicks = 3;
+							}
+						}
 
-                                                        CNetObj_PlayerInput SafetyTest = Input;
-                                                        if(PredictFreeze(Core, SafetyTest, m_pClient->Collision(), false, nullptr, g_PredictFreezeTicks))
-                                                        {
-                                                                RageState.Reset();
-                                                                Input.m_Hook = 0;
-                                                        }
-                                                }
-                                        }
-                                        else
-                                        {
-                                                RageState.Reset();
-                                                Input.m_Hook = 0;
-                                        }
-                                }
-                        }
-                        else
-                        {
-                                RageState.Reset();
-                        }
+						if(KeepHook && length(RageState.m_LastThreatDir) > 0.01f)
+						{
+							vec2 Adjusted(0.0f, 0.0f);
+							bool AdjustedSafe = false;
+							float AdjustedScore = 0.0f;
+							if(TryHookRescue(Core, Input, RageState.m_LastThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &Adjusted, &AdjustedSafe, &AdjustedScore))
+							{
+								RageState.m_LastTarget = Adjusted;
+								RageState.m_LastSafe = AdjustedSafe;
+								RageState.m_LastScore = AdjustedScore;
+								if(AdjustedSafe)
+									RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, 4);
+							}
+						}
+					}
+
+					if(KeepHook)
+					{
+						CNetObj_PlayerInput HookInput = Input;
+						HookInput.m_Hook = 1;
+						HookInput.m_TargetX = (int)RageState.m_LastTarget.x;
+						HookInput.m_TargetY = (int)RageState.m_LastTarget.y;
+
+						if(PredictFreeze(Core, HookInput, m_pClient->Collision(), false, nullptr, g_PredictFreezeTicks))
+						{
+							KeepHook = false;
+						}
+						else
+						{
+							Input.m_Hook = 1;
+							Input.m_TargetX = HookInput.m_TargetX;
+							Input.m_TargetY = HookInput.m_TargetY;
+						}
+					}
+
+					if(!KeepHook)
+					{
+						RageState.Reset();
+						Input.m_Hook = 0;
+					}
+				}
+				else
+				{
+					RageState.Reset();
+				}
+
                 }
                 // stress testing
 #ifdef CONF_DEBUG

@@ -20,21 +20,25 @@ public:
         vec2 m_aMousePosOnAction[NUM_DUMMIES];
         vec2 m_aTargetPos[NUM_DUMMIES];
 
-        struct CRageState
-        {
-                bool m_Active;
-                int m_HoldTicks;
-                vec2 m_LastTarget;
-                vec2 m_LastThreatDir;
+	struct CRageState
+	{
+		bool m_Active;
+		int m_HoldTicks;
+		vec2 m_LastTarget;
+		vec2 m_LastThreatDir;
+		bool m_LastSafe;
+		float m_LastScore;
 
-                void Reset()
-                {
-                        m_Active = false;
-                        m_HoldTicks = 0;
-                        m_LastTarget = vec2(0.0f, 0.0f);
-                        m_LastThreatDir = vec2(0.0f, 0.0f);
-                }
-        };
+		void Reset()
+		{
+			m_Active = false;
+			m_HoldTicks = 0;
+			m_LastTarget = vec2(0.0f, 0.0f);
+			m_LastThreatDir = vec2(0.0f, 0.0f);
+			m_LastSafe = false;
+			m_LastScore = 0.0f;
+		}
+	};
 
         CRageState m_aRageState[NUM_DUMMIES];
 
