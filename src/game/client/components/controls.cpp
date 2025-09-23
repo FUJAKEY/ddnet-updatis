@@ -1,6 +1,5 @@
 /* (c) Magnus Auvinen. See licence.txt in the root of the distribution for more information. */
 /* If you are missing that file, acquire a complete release at teeworlds.com.		*/
-#include <array>
 #include <base/math.h>
 
 #include <engine/client.h>
@@ -28,11 +27,43 @@ static constexpr float DegToRad(float Deg)
         return Deg * pi / 180.0f;
 }
 
+static bool IsFreezeTileIndex(int Tile)
+{
+        return Tile == TILE_FREEZE || Tile == TILE_DFREEZE || Tile == TILE_LFREEZE;
+}
+
+static bool IsHookPointOnFreeze(const vec2 &Pos, CCollision *pCollision)
+{
+        if(!pCollision)
+                return false;
+
+        const int Index = pCollision->GetPureMapIndex(Pos);
+        return IsFreezeTileIndex(pCollision->GetTileIndex(Index)) || IsFreezeTileIndex(pCollision->GetFrontTileIndex(Index));
+}
+
+static bool ValidateHookTarget(const CCharacterCore &Core, const vec2 &Target, CCollision *pCollision, float HookLength)
+{
+        if(length(Target) < 0.01f || !pCollision)
+                return false;
+
+        vec2 HookPoint = Target;
+        vec2 Before;
+        const int HitTile = pCollision->IntersectLineTeleHook(Core.m_Pos, Target, &HookPoint, &Before);
+        if(HitTile == 0 || HitTile == TILE_NOHOOK)
+                return false;
+        if(IsFreezeTileIndex(HitTile))
+                return false;
+        if(IsHookPointOnFreeze(HookPoint, pCollision))
+                return false;
+
+        return distance(Core.m_Pos, HookPoint) <= HookLength + 1.0f;
+}
+
 static bool CheckFreeze(const vec2 &Pos, CCollision *pCollision, vec2 *pHit = nullptr)
 {
-	static const vec2 s_aOffsets[] = {
-		vec2(0.0f, 0.0f),
-		vec2(14.0f, 0.0f),
+        static const vec2 s_aOffsets[] = {
+                vec2(0.0f, 0.0f),
+                vec2(14.0f, 0.0f),
 		vec2(-14.0f, 0.0f),
 		vec2(0.0f, 14.0f),
 		vec2(0.0f, -14.0f)};
@@ -70,165 +101,197 @@ static bool PredictFreeze(CCharacterCore Core, const CNetObj_PlayerInput &Input,
 }
 
 static bool TryHookRescue(const CCharacterCore &Core, CNetObj_PlayerInput &Input, const vec2 &HitDir, CCollision *pCollision,
-	float HookLength, bool AllowUnsafe)
+        float HookLength, const vec2 &LastTarget, vec2 *pOutTarget, bool *pOutSafe)
 {
-	if(HookLength <= 0.0f)
-		HookLength = 380.0f;
+        if(HookLength <= 0.0f)
+                HookLength = 380.0f;
 
-	vec2 ThreatDir = HitDir;
-	if(length(ThreatDir) < 0.01f)
-		ThreatDir = vec2(1.0f, 0.0f);
-	else
-		ThreatDir = normalize(ThreatDir);
+        vec2 ThreatDir = HitDir;
+        if(length(ThreatDir) < 0.01f)
+                ThreatDir = vec2(1.0f, 0.0f);
+        else
+                ThreatDir = normalize(ThreatDir);
 
-	vec2 EscapeDir = -ThreatDir;
-	if(length(EscapeDir) < 0.01f)
-		EscapeDir = vec2(-1.0f, 0.0f);
-	const vec2 EscapeNorm = normalize(EscapeDir);
+        vec2 EscapeNorm = -ThreatDir;
+        if(length(EscapeNorm) < 0.01f)
+                EscapeNorm = vec2(-1.0f, 0.0f);
+        else
+                EscapeNorm = normalize(EscapeNorm);
 
-	const vec2 Vel = Core.m_Vel;
-	const float VelLen = length(Vel);
-	vec2 VelNorm = vec2(0.0f, 0.0f);
-	if(VelLen > 0.001f)
-		VelNorm = Vel / VelLen;
+        const vec2 Vel = Core.m_Vel;
+        const float VelLen = length(Vel);
+        vec2 VelNorm = vec2(0.0f, 0.0f);
+        if(VelLen > 0.001f)
+                VelNorm = Vel / VelLen;
 
-	const std::array<float, 17> aAngles = {
-		DegToRad(0.0f),
-		DegToRad(15.0f),
-		-DegToRad(15.0f),
-		DegToRad(30.0f),
-		-DegToRad(30.0f),
-		DegToRad(45.0f),
-		-DegToRad(45.0f),
-		DegToRad(60.0f),
-		-DegToRad(60.0f),
-		DegToRad(75.0f),
-		-DegToRad(75.0f),
-		DegToRad(90.0f),
-		-DegToRad(90.0f),
-		DegToRad(105.0f),
-		-DegToRad(105.0f),
-		DegToRad(120.0f),
-		-DegToRad(120.0f)
-	};
+        const auto Rotate = [](const vec2 &Dir, float Angle) {
+                const float C = std::cos(Angle);
+                const float S = std::sin(Angle);
+                return vec2(Dir.x * C - Dir.y * S, Dir.x * S + Dir.y * C);
+        };
 
-	const auto Rotate = [](const vec2 &Dir, float Angle) {
-		const float C = std::cos(Angle);
-		const float S = std::sin(Angle);
-		return vec2(Dir.x * C - Dir.y * S, Dir.x * S + Dir.y * C);
-	};
+        const CNetObj_PlayerInput BaseInput = Input;
 
-	bool FoundSafe = false;
-	float BestSafeScore = -1e9f;
-	vec2 BestSafeTarget = Core.m_Pos;
+        bool FoundSafe = false;
+        bool FoundFallback = false;
+        float BestSafeScore = -1e9f;
+        float BestFallbackScore = -1e9f;
+        vec2 BestSafeTarget = Core.m_Pos;
+        vec2 BestFallbackTarget = Core.m_Pos;
 
-	float BestAnyScore = -1e9f;
-	vec2 BestAnyTarget = Core.m_Pos;
+        const auto EvaluateDirection = [&](const vec2 &RawDir) {
+                vec2 Dir = RawDir;
+                if(length(Dir) < 0.01f)
+                        return;
+                Dir = normalize(Dir);
 
-	for(float Angle : aAngles)
-	{
-		vec2 Dir = Rotate(EscapeNorm, Angle);
-		if(length(Dir) < 0.001f)
-			continue;
-		Dir = normalize(Dir);
+                vec2 AimPos = Core.m_Pos + Dir * HookLength;
+                vec2 HookPoint = AimPos;
+                bool HasAttach = false;
+                if(pCollision)
+                {
+                        vec2 Before;
+                        const int HitTile = pCollision->IntersectLineTeleHook(Core.m_Pos, AimPos, &HookPoint, &Before);
+                        if(HitTile == 0 || HitTile == TILE_NOHOOK)
+                                return;
+                        if(IsFreezeTileIndex(HitTile))
+                                return;
+                        if(IsHookPointOnFreeze(HookPoint, pCollision))
+                                return;
+                        if(distance(Core.m_Pos, HookPoint) > HookLength + 1.0f)
+                                return;
+                        HasAttach = true;
+                }
 
-		vec2 AimPos = Core.m_Pos + Dir * HookLength;
+                if(!HasAttach)
+                        return;
 
-		vec2 HookPoint = AimPos;
-		bool HasAttach = false;
-		if(pCollision)
-		{
-			vec2 Before;
-			const int HitTile = pCollision->IntersectLineTeleHook(Core.m_Pos, AimPos, &HookPoint, &Before);
-			if(HitTile != 0 && HitTile != TILE_NOHOOK)
-				HasAttach = true;
-		}
+                CNetObj_PlayerInput Test = BaseInput;
+                Test.m_Hook = 1;
+                Test.m_TargetX = (int)HookPoint.x;
+                Test.m_TargetY = (int)HookPoint.y;
 
-		if(!HasAttach && !AllowUnsafe)
-			continue;
+                const bool Safe = !PredictFreeze(Core, Test, pCollision, false, nullptr, g_HookRescuePredictTicks);
 
-		CNetObj_PlayerInput Test = Input;
-		Test.m_Hook = 1;
-		Test.m_TargetX = (int)AimPos.x;
-		Test.m_TargetY = (int)AimPos.y;
+                float Score = dot(Dir, EscapeNorm) * 6.0f;
+                Score -= maximum(dot(Dir, ThreatDir), 0.0f) * 5.0f;
+                Score += clamp(-Dir.y, 0.0f, 1.0f) * 4.0f;
+                Score -= maximum(Dir.y, 0.0f) * 6.0f;
 
-		const bool Safe = HasAttach && !PredictFreeze(Core, Test, pCollision, false, nullptr, g_HookRescuePredictTicks);
+                if(VelLen > 0.001f)
+                        Score += -dot(Dir, VelNorm) * 2.0f;
 
-		float Score = dot(Dir, EscapeNorm) * 3.0f;
-		if(VelLen > 0.001f)
-			Score += -dot(Dir, VelNorm) * 1.5f;
-		if(Vel.y > 1.0f)
-			Score += clamp(-Dir.y, 0.0f, 1.0f) * 3.0f;
+                const float AttachDistance = distance(Core.m_Pos, HookPoint);
+                const float AttachScore = clamp(1.0f - AttachDistance / HookLength, 0.0f, 1.0f);
+                Score += AttachScore * 3.0f;
 
-		const float DownPenalty = Dir.y > 0.0f ? Dir.y : 0.0f;
-		const float DownWeight = Vel.y > 1.0f ? 6.0f : 3.0f;
-		Score -= DownPenalty * DownWeight;
+                if(length(LastTarget) > 0.01f)
+                {
+                        const float Similarity = clamp(1.0f - distance(HookPoint, LastTarget) / 64.0f, -1.0f, 1.0f);
+                        Score += Similarity * 1.5f;
+                }
 
-		if(HasAttach)
-		{
-			const float AttachDistance = distance(Core.m_Pos, HookPoint);
-			const float AttachScore = clamp(1.0f - AttachDistance / HookLength, 0.0f, 1.0f);
-			Score += AttachScore * 2.0f;
-		}
-		else
-			Score -= 3.0f;
+                if(Safe)
+                {
+                        if(!FoundSafe || Score > BestSafeScore)
+                        {
+                                FoundSafe = true;
+                                BestSafeScore = Score;
+                                BestSafeTarget = HookPoint;
+                        }
+                }
+                else
+                {
+                        Score -= 3.0f;
+                        if(!FoundFallback || Score > BestFallbackScore)
+                        {
+                                FoundFallback = true;
+                                BestFallbackScore = Score;
+                                BestFallbackTarget = HookPoint;
+                        }
+                }
+        };
 
-		vec2 CandidateTarget = HasAttach ? HookPoint : AimPos;
+        if(length(LastTarget) > 0.01f)
+                EvaluateDirection(LastTarget - Core.m_Pos);
 
-		if(Safe)
-		{
-			if(Score > BestSafeScore)
-			{
-				BestSafeScore = Score;
-				BestSafeTarget = CandidateTarget;
-				FoundSafe = true;
-			}
-			continue;
-		}
+        const int MaxAngleSteps = 11;
+        for(int Step = 0; Step <= MaxAngleSteps; ++Step)
+        {
+                const float Angle = DegToRad(Step * 15.0f);
+                EvaluateDirection(Rotate(EscapeNorm, Angle));
+                if(Step != 0)
+                        EvaluateDirection(Rotate(EscapeNorm, -Angle));
+        }
 
-		if(AllowUnsafe && HasAttach && Score > BestAnyScore)
-		{
-			BestAnyScore = Score;
-			BestAnyTarget = CandidateTarget;
-		}
-	}
+        vec2 Side = vec2(-EscapeNorm.y, EscapeNorm.x);
+        for(int Step = -4; Step <= 4; ++Step)
+        {
+                const float Angle = DegToRad(Step * 15.0f);
+                EvaluateDirection(Rotate(Side, Angle));
+        }
 
-	if(FoundSafe)
-	{
-		Input.m_Hook = 1;
-		Input.m_TargetX = (int)BestSafeTarget.x;
-		Input.m_TargetY = (int)BestSafeTarget.y;
-		return true;
-	}
+        EvaluateDirection(vec2(0.0f, -1.0f));
+        EvaluateDirection(vec2(-1.0f, -0.4f));
+        EvaluateDirection(vec2(1.0f, -0.4f));
 
-	if(AllowUnsafe && BestAnyScore > -1e8f)
-	{
-		Input.m_Hook = 1;
-		Input.m_TargetX = (int)BestAnyTarget.x;
-		Input.m_TargetY = (int)BestAnyTarget.y;
-		return true;
-	}
+        if(VelLen > 0.001f)
+        {
+                EvaluateDirection(-VelNorm);
+                EvaluateDirection(Rotate(-VelNorm, DegToRad(20.0f)));
+                EvaluateDirection(Rotate(-VelNorm, -DegToRad(20.0f)));
+        }
 
-	return false;
+        if(FoundSafe)
+        {
+                Input.m_Hook = 1;
+                Input.m_TargetX = (int)BestSafeTarget.x;
+                Input.m_TargetY = (int)BestSafeTarget.y;
+                if(pOutTarget)
+                        *pOutTarget = BestSafeTarget;
+                if(pOutSafe)
+                        *pOutSafe = true;
+                return true;
+        }
+
+        if(FoundFallback)
+        {
+                Input.m_Hook = 1;
+                Input.m_TargetX = (int)BestFallbackTarget.x;
+                Input.m_TargetY = (int)BestFallbackTarget.y;
+                if(pOutTarget)
+                        *pOutTarget = BestFallbackTarget;
+                if(pOutSafe)
+                        *pOutSafe = false;
+                return true;
+        }
+
+        return false;
 }
 
 CControls::CControls()
 {
-	mem_zero(&m_aLastData, sizeof(m_aLastData));
-	mem_zero(m_aMousePos, sizeof(m_aMousePos));
-	mem_zero(m_aMousePosOnAction, sizeof(m_aMousePosOnAction));
-	mem_zero(m_aTargetPos, sizeof(m_aTargetPos));
+        mem_zero(&m_aLastData, sizeof(m_aLastData));
+        mem_zero(m_aMousePos, sizeof(m_aMousePos));
+        mem_zero(m_aMousePosOnAction, sizeof(m_aMousePosOnAction));
+        mem_zero(m_aTargetPos, sizeof(m_aTargetPos));
+
+        for(int i = 0; i < NUM_DUMMIES; ++i)
+                m_aRageState[i].Reset();
 }
 
 void CControls::OnReset()
 {
-	ResetInput(0);
-	ResetInput(1);
+        ResetInput(0);
+        ResetInput(1);
 
-	for(int &AmmoCount : m_aAmmoCount)
-		AmmoCount = 0;
+        for(int &AmmoCount : m_aAmmoCount)
+                AmmoCount = 0;
 
-	m_LastSendTime = 0;
+        m_LastSendTime = 0;
+
+        for(int i = 0; i < NUM_DUMMIES; ++i)
+                m_aRageState[i].Reset();
 }
 
 void CControls::ResetInput(int Dummy)
@@ -247,8 +310,11 @@ void CControls::ResetInput(int Dummy)
 
 void CControls::OnPlayerDeath()
 {
-	for(int &AmmoCount : m_aAmmoCount)
-		AmmoCount = 0;
+        for(int &AmmoCount : m_aAmmoCount)
+                AmmoCount = 0;
+
+        for(int i = 0; i < NUM_DUMMIES; ++i)
+                m_aRageState[i].Reset();
 }
 
 struct CInputState
@@ -538,25 +604,111 @@ int CControls::SnapInput(int *pData)
                                         HookThreatDir = HitDirShort;
                         }
 
-                        if(GoresMode == 2 && DangerLong)
-                        {
-                                bool ShouldHook = false;
-                                const bool HorizontalThreat = absolute(HookThreatDir.y) <= absolute(HookThreatDir.x);
-                                if(HorizontalThreat)
-                                {
-                                        CNetObj_PlayerInput Future = Input;
-                                        if(PredictFreeze(Core, Future, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
-                                                ShouldHook = true;
-                                }
-                                else if(PredictFreeze(Core, Input, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
-                                        ShouldHook = true;
+                        CRageState &RageState = m_aRageState[g_Config.m_ClDummy];
+                        const float HookLength = m_pClient->m_aTuning[g_Config.m_ClDummy].m_HookLength;
 
-                                if(ShouldHook)
+                        if(GoresMode == 2)
+                        {
+                                if(DangerLong)
                                 {
-                                        float HookLength = m_pClient->m_aTuning[g_Config.m_ClDummy].m_HookLength;
-                                        if(!TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, false))
-                                                TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, true);
+                                        RageState.m_LastThreatDir = HookThreatDir;
+                                        bool ShouldHook = false;
+                                        const bool HorizontalThreat = absolute(HookThreatDir.y) <= absolute(HookThreatDir.x);
+                                        if(HorizontalThreat)
+                                        {
+                                                CNetObj_PlayerInput Future = Input;
+                                                if(PredictFreeze(Core, Future, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
+                                                        ShouldHook = true;
+                                        }
+                                        else if(PredictFreeze(Core, Input, m_pClient->Collision(), false, nullptr, g_HookRescuePredictTicks))
+                                                ShouldHook = true;
+
+                                        if(ShouldHook)
+                                        {
+                                                vec2 NewTarget(0.0f, 0.0f);
+                                                bool SafeTarget = false;
+                                                if(TryHookRescue(Core, Input, HookThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &NewTarget, &SafeTarget))
+                                                {
+                                                        RageState.m_Active = true;
+                                                        RageState.m_LastTarget = NewTarget;
+                                                        RageState.m_LastThreatDir = HookThreatDir;
+                                                        RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, SafeTarget ? 8 : 4);
+                                                }
+                                        }
                                 }
+
+                                if(RageState.m_Active)
+                                {
+                                        bool KeepHook = DangerLong;
+
+                                        if(!DangerLong)
+                                        {
+                                                if(RageState.m_HoldTicks > 0)
+                                                {
+                                                        RageState.m_HoldTicks--;
+                                                        KeepHook = true;
+                                                }
+                                                else
+                                                {
+                                                        CNetObj_PlayerInput ReleaseTest = Input;
+                                                        ReleaseTest.m_Hook = 0;
+                                                        if(PredictFreeze(Core, ReleaseTest, m_pClient->Collision(), true, nullptr, g_PredictFreezeTicks))
+                                                        {
+                                                                KeepHook = true;
+                                                                RageState.m_HoldTicks = 2;
+                                                        }
+                                                }
+
+                                                if(KeepHook && length(RageState.m_LastThreatDir) > 0.01f)
+                                                {
+                                                        CNetObj_PlayerInput Candidate = Input;
+                                                        vec2 NewTarget(0.0f, 0.0f);
+                                                        bool SafeTarget = false;
+                                                        if(TryHookRescue(Core, Candidate, RageState.m_LastThreatDir, m_pClient->Collision(), HookLength, RageState.m_LastTarget, &NewTarget, &SafeTarget))
+                                                        {
+                                                                Input = Candidate;
+                                                                RageState.m_LastTarget = NewTarget;
+                                                                if(SafeTarget)
+                                                                        RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, 4);
+                                                        }
+                                                }
+                                        }
+                                        else
+                                        {
+                                                RageState.m_HoldTicks = maximum(RageState.m_HoldTicks, 4);
+                                        }
+
+                                        if(KeepHook)
+                                        {
+                                                if(!ValidateHookTarget(Core, RageState.m_LastTarget, m_pClient->Collision(), HookLength))
+                                                {
+                                                        RageState.Reset();
+                                                        Input.m_Hook = 0;
+                                                }
+                                                else
+                                                {
+                                                        Input.m_Hook = 1;
+                                                        Input.m_TargetX = (int)RageState.m_LastTarget.x;
+                                                        Input.m_TargetY = (int)RageState.m_LastTarget.y;
+
+                                                        CNetObj_PlayerInput SafetyTest = Input;
+                                                        if(PredictFreeze(Core, SafetyTest, m_pClient->Collision(), false, nullptr, g_PredictFreezeTicks))
+                                                        {
+                                                                RageState.Reset();
+                                                                Input.m_Hook = 0;
+                                                        }
+                                                }
+                                        }
+                                        else
+                                        {
+                                                RageState.Reset();
+                                                Input.m_Hook = 0;
+                                        }
+                                }
+                        }
+                        else
+                        {
+                                RageState.Reset();
                         }
                 }
                 // stress testing
